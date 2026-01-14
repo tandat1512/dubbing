@@ -1,0 +1,158 @@
+{
+  "04 Pandas Basics (DataFrame Basics I)-20251224T123346Z-1-001/04 Pandas Basics (DataFrame Basics I)/003 How to read CSV-files from other Locations.mp4": {
+    "completed": true,
+    "updated_at": "2026-01-06T19:50:15.062253"
+  },
+  "04 Pandas Basics (DataFrame Basics I)-20251224T123346Z-1-001/04 Pandas Basics (DataFrame Basics I)/002 Quiz Loading a CSV-file into Pandas.html": {
+    "completed": true,
+    "updated_at": "2026-01-05T20:41:44.358307"
+  },
+  "04 Pandas Basics (DataFrame Basics I)-20251224T123346Z-1-001/04 Pandas Basics (DataFrame Basics I)/005 First Data Inspection.mp4": {
+    "completed": true,
+    "updated_at": "2026-01-05T20:41:47.945289"
+  },
+  "04 Pandas Basics (DataFrame Basics I)-20251224T123346Z-1-001/04 Pandas Basics (DataFrame Basics I)/006 Quiz Summary Statistics.html": {
+    "completed": true,
+    "updated_at": "2026-01-05T20:41:49.454057"
+  },
+  "04 Pandas Basics (DataFrame Basics I)-20251224T123346Z-1-001/04 Pandas Basics (DataFrame Basics I)/008 Make it easy TAB Completion and Tooltip.mp4": {
+    "completed": true,
+    "updated_at": "2026-01-05T20:41:52.397070"
+  },
+  "04 Pandas Basics (DataFrame Basics I)-20251224T123346Z-1-001/04 Pandas Basics (DataFrame Basics I)/009 Quiz First Steps.html": {
+    "completed": true,
+    "updated_at": "2026-01-05T20:41:54.111655"
+  },
+  "04 Pandas Basics (DataFrame Basics I)-20251224T123346Z-1-001/04 Pandas Basics (DataFrame Basics I)/012 Selecting Columns.mp4": {
+    "completed": true,
+    "updated_at": "2026-01-06T18:55:25.837040"
+  },
+  "04 Pandas Basics (DataFrame Basics I)-20251224T123346Z-1-001/04 Pandas Basics (DataFrame Basics I)/013 Selecting one Column with the dot notation.mp4": {
+    "completed": true,
+    "updated_at": "2026-01-06T18:58:51.915928"
+  },
+  "04 Pandas Basics (DataFrame Basics I)-20251224T123346Z-1-001/04 Pandas Basics (DataFrame Basics I)/014 Quiz Selecting Columns.html": {
+    "completed": true,
+    "updated_at": "2026-01-06T19:03:24.685182"
+  },
+  "04 Pandas Basics (DataFrame Basics I)-20251224T123346Z-1-001/04 Pandas Basics (DataFrame Basics I)/015 positions.pdf": {
+    "completed": true,
+    "updated_at": "2026-01-06T19:03:25.863670"
+  },
+  "04 Pandas Basics (DataFrame Basics I)-20251224T123346Z-1-001/04 Pandas Basics (DataFrame Basics I)/015 Zero-based Indexing and Negative Indexing.mp4": {
+    "completed": true,
+    "updated_at": "2026-01-06T19:10:54.916383"
+  },
+  "04 Pandas Basics (DataFrame Basics I)-20251224T123346Z-1-001/04 Pandas Basics (DataFrame Basics I)/010 Explore your own Dataset Jupyter Coding Exercise 1 (Intro).mp4": {
+    "completed": true,
+    "updated_at": "2026-01-06T19:50:13.750578"
+  },
+  "04 Pandas Basics (DataFrame Basics I)-20251224T123346Z-1-001/04 Pandas Basics (DataFrame Basics I)/011 Explore your own Dataset Jupyter Coding Exercise 1 (Solution).mp4": {
+    "completed": true,
+    "updated_at": "2026-01-06T19:50:13.738020"
+  },
+  "04 Pandas Basics (DataFrame Basics I)-20251224T123346Z-1-001/04 Pandas Basics (DataFrame Basics I)/004 Pandas Display Options and the methods head()  tail().mp4": {
+    "completed": true,
+    "updated_at": "2026-01-06T19:50:13.977274"
+  },
+  "04 Pandas Basics (DataFrame Basics I)-20251224T123346Z-1-001/04 Pandas Basics (DataFrame Basics I)/016 Selecting Rows with iloc (position-based indexing).mp4": {
+    "completed": true,
+    "updated_at": "2026-01-06T19:59:43.534756"
+  },
+  "04 Pandas Basics (DataFrame Basics I)-20251224T123346Z-1-001/04 Pandas Basics (DataFrame Basics I)/017 Slicing Rows and Columns with iloc (position-based indexing).mp4": {
+    "completed": true,
+    "updated_at": "2026-01-06T20:13:44.470718"
+  },
+  "04 Pandas Basics (DataFrame Basics I)-20251224T123346Z-1-001/04 Pandas Basics (DataFrame Basics I)/007 Built-in Functions, Attributes and Methods with Pandas.mp4": {
+    "completed": true,
+    "updated_at": "2026-01-06T20:13:50.540746"
+  },
+  "04 Pandas Basics (DataFrame Basics I)-20251224T123346Z-1-001/04 Pandas Basics (DataFrame Basics I)/001 Create your very first Pandas DataFrame (from csv).mp4": {
+    "completed": true,
+    "updated_at": "2026-01-06T20:13:52.292696"
+  },
+  "04 Pandas Basics (DataFrame Basics I)-20251224T123346Z-1-001/04 Pandas Basics (DataFrame Basics I)/018 Position-based Indexing Cheat Sheets.html": {
+    "completed": true,
+    "updated_at": "2026-01-06T20:33:07.200017"
+  },
+  "04 Pandas Basics (DataFrame Basics I)-20251224T123346Z-1-001/04 Pandas Basics (DataFrame Basics I)/018 pandas-iloc.pdf": {
+    "completed": true,
+    "updated_at": "2026-01-06T20:33:08.052809"
+  },
+  "04 Pandas Basics (DataFrame Basics I)-20251224T123346Z-1-001/04 Pandas Basics (DataFrame Basics I)/019 Quiz Position-based Indexing 1.html": {
+    "completed": true,
+    "updated_at": "2026-01-06T20:33:09.384316"
+  },
+  "04 Pandas Basics (DataFrame Basics I)-20251224T123346Z-1-001/04 Pandas Basics (DataFrame Basics I)/020 Quiz Position-based Indexing 2.html": {
+    "completed": true,
+    "updated_at": "2026-01-06T20:33:10.490579"
+  },
+  "04 Pandas Basics (DataFrame Basics I)-20251224T123346Z-1-001/04 Pandas Basics (DataFrame Basics I)/021 Selecting Rows with loc (label-based indexing).mp4": {
+    "completed": true,
+    "updated_at": "2026-01-06T20:39:55.660662"
+  },
+  "04 Pandas Basics (DataFrame Basics I)-20251224T123346Z-1-001/04 Pandas Basics (DataFrame Basics I)/022 Slicing Rows and Columns with loc (label-based indexing).mp4": {
+    "completed": true,
+    "updated_at": "2026-01-08T16:12:17.797417"
+  },
+  "04 Pandas Basics (DataFrame Basics I)-20251224T123346Z-1-001/04 Pandas Basics (DataFrame Basics I)/023 Label-based Indexing Cheat Sheets.html": {
+    "completed": true,
+    "updated_at": "2026-01-08T16:15:59.759358"
+  },
+  "04 Pandas Basics (DataFrame Basics I)-20251224T123346Z-1-001/04 Pandas Basics (DataFrame Basics I)/023 Pandas-loc.pdf": {
+    "completed": true,
+    "updated_at": "2026-01-08T16:16:00.161540"
+  },
+  "04 Pandas Basics (DataFrame Basics I)-20251224T123346Z-1-001/04 Pandas Basics (DataFrame Basics I)/024 Quiz Label-based Indexing 1.html": {
+    "completed": true,
+    "updated_at": "2026-01-08T16:16:01.201916"
+  },
+  "04 Pandas Basics (DataFrame Basics I)-20251224T123346Z-1-001/04 Pandas Basics (DataFrame Basics I)/025 Quiz Label-based Indexing 2.html": {
+    "completed": true,
+    "updated_at": "2026-01-08T16:16:02.058982"
+  },
+  "04 Pandas Basics (DataFrame Basics I)-20251224T123346Z-1-001/04 Pandas Basics (DataFrame Basics I)/026 Indexing and Slicing with reindex().mp4": {
+    "completed": true,
+    "updated_at": "2026-01-08T16:46:52.970711"
+  },
+  "04 Pandas Basics (DataFrame Basics I)-20251224T123346Z-1-001/04 Pandas Basics (DataFrame Basics I)/027 Summary, Best Practices and Outlook.mp4": {
+    "completed": true,
+    "updated_at": "2026-01-08T16:55:48.977542"
+  },
+  "04 Pandas Basics (DataFrame Basics I)-20251224T123346Z-1-001/04 Pandas Basics (DataFrame Basics I)/028 Quiz Indexing and Slicing.html": {
+    "completed": true,
+    "updated_at": "2026-01-08T17:04:49.515657"
+  },
+  "04 Pandas Basics (DataFrame Basics I)-20251224T123346Z-1-001/04 Pandas Basics (DataFrame Basics I)/029 Jupyter Coding Exercise 2  - Intro.mp4": {
+    "completed": true,
+    "updated_at": "2026-01-08T17:31:43.738123"
+  },
+  "04 Pandas Basics (DataFrame Basics I)-20251224T123346Z-1-001/04 Pandas Basics (DataFrame Basics I)/030 Jupyter Coding Exercise 2 - Solution.mp4": {
+    "completed": true,
+    "updated_at": "2026-01-08T17:36:22.800472"
+  },
+  "04 Pandas Basics (DataFrame Basics I)-20251224T123346Z-1-001/04 Pandas Basics (DataFrame Basics I)/031 NEW Coding Exercises with ChatGPT.mp4": {
+    "completed": true,
+    "updated_at": "2026-01-08T17:47:45.560063"
+  },
+  "04 Pandas Basics (DataFrame Basics I)-20251224T123346Z-1-001/04 Pandas Basics (DataFrame Basics I)/032 Advanced Indexing and Slicing (optional).mp4": {
+    "completed": true,
+    "updated_at": "2026-01-08T18:05:17.408367"
+  },
+  "04 Pandas Basics (DataFrame Basics I)-20251224T123346Z-1-001/04 Pandas Basics (DataFrame Basics I)/033 Which Role Play do you like most.mp4": {
+    "completed": true,
+    "updated_at": "2026-01-08T18:05:58.550765"
+  },
+  "05 Excursus How to avoid and debug Coding Errors (incl. ChatGPT)-20260108T100648Z-1-001/05 Excursus How to avoid and debug Coding Errors (incl. ChatGPT)/001 Introduction.mp4": {
+    "completed": true,
+    "updated_at": "2026-01-08T22:13:06.753983"
+  },
+  "05 Excursus How to avoid and debug Coding Errors (incl. ChatGPT)-20260108T100648Z-1-001/05 Excursus How to avoid and debug Coding Errors (incl. ChatGPT)/002 Test your debugging skills!.mp4": {
+    "completed": false,
+    "updated_at": "2026-01-08T22:23:38.391534"
+  },
+  "05 Excursus How to avoid and debug Coding Errors (incl. ChatGPT)-20260108T100648Z-1-001/05 Excursus How to avoid and debug Coding Errors (incl. ChatGPT)/003 Major reasons for Coding Errors.mp4": {
+    "completed": false,
+    "updated_at": "2026-01-08T22:23:31.243516"
+  }
+}

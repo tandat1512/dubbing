@@ -1,0 +1,1076 @@
+import React, { useState, useEffect } from 'react';
+import axios from 'axios';
+import {
+  Library,
+  Mic,
+  Languages,
+  CheckCircle2,
+  FolderPlus,
+  TrendingUp,
+  PlayCircle,
+  FileText,
+  AlertCircle,
+  Search,
+  Settings,
+  MoreVertical,
+  RotateCw
+} from 'lucide-react';
+import { motion, AnimatePresence } from 'framer-motion';
+
+const API_BASE = 'http://localhost:3000/api';
+
+function App() {
+  const [activeTab, setActiveTab] = useState('courses');
+  const [courses, setCourses] = useState([]);
+  const [stats, setStats] = useState(null);
+  const [loading, setLoading] = useState(true);
+  const [selectedCourse, setSelectedCourse] = useState(null);
+  const [lessons, setLessons] = useState([]);
+  const [videosWithoutSrt, setVideosWithoutSrt] = useState([]);
+  const [currentLesson, setCurrentLesson] = useState(null);
+  const [processingDub, setProcessingDub] = useState(false);
+  const [processingSTT, setProcessingSTT] = useState(false);
+  const [useDubbedAudio, setUseDubbedAudio] = useState(false);
+  const [subtitles, setSubtitles] = useState([]);
+  const [vietnameseSubtitles, setVietnameseSubtitles] = useState([]);
+  const [currentTime, setCurrentTime] = useState(0);
+  const [showSubtitles, setShowSubtitles] = useState(true);
+  const [subtitleLanguage, setSubtitleLanguage] = useState('en'); // 'en' or 'vi'
+  const [isFullscreen, setIsFullscreen] = useState(false);
+  const videoRef = React.useRef(null);
+  const audioRef = React.useRef(null);
+  const transcriptRef = React.useRef(null);
+  const videoContainerRef = React.useRef(null);
+
+  useEffect(() => {
+    fetchInitialData();
+
+    // Load subtitle preferences from localStorage
+    const savedShowSubtitles = localStorage.getItem('showSubtitles');
+    const savedSubtitleLanguage = localStorage.getItem('subtitleLanguage');
+
+    if (savedShowSubtitles !== null) {
+      setShowSubtitles(savedShowSubtitles === 'true');
+    }
+    if (savedSubtitleLanguage) {
+      setSubtitleLanguage(savedSubtitleLanguage);
+    }
+  }, []);
+
+  // Save subtitle preferences to localStorage when they change
+  useEffect(() => {
+    localStorage.setItem('showSubtitles', showSubtitles.toString());
+  }, [showSubtitles]);
+
+  useEffect(() => {
+    localStorage.setItem('subtitleLanguage', subtitleLanguage);
+  }, [subtitleLanguage]);
+
+  const fetchInitialData = async () => {
+    try {
+      setLoading(true);
+      const [coursesRes, statsRes, srtRes] = await Promise.all([
+        axios.get(`${API_BASE}/courses`),
+        axios.get(`${API_BASE}/stats`),
+        axios.get(`${API_BASE}/videos-without-srt`)
+      ]);
+      setCourses(coursesRes.data.courses);
+      setStats(statsRes.data);
+      setVideosWithoutSrt(srtRes.data.videos);
+    } catch (error) {
+      console.error("Error fetching data:", error);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const selectFolder = async () => {
+    try {
+      const res = await axios.post(`${API_BASE}/select-folder`);
+      if (res.data.status === 'success') {
+        const scanRes = await axios.post(`${API_BASE}/scan-folder`, { folder_path: res.data.folder_path });
+        if (scanRes.data.status === 'success') {
+          fetchInitialData();
+        }
+      }
+    } catch (error) {
+      console.error("Folder selection failed:", error);
+    }
+  };
+
+  const loadLessons = async (course) => {
+    try {
+      setSelectedCourse(course);
+      const res = await axios.get(`${API_BASE}/lessons/${course.lessons_path}`);
+      setLessons(res.data.lessons);
+    } catch (error) {
+      console.error("Error loading lessons:", error);
+    }
+  };
+
+  const toggleProgress = async (lesson) => {
+    try {
+      const isCompleted = stats?.progress?.[lesson.path]?.completed;
+      await axios.post(`${API_BASE}/update-progress`, {
+        lesson_path: lesson.path,
+        completed: !isCompleted
+      });
+      fetchInitialData();
+    } catch (error) {
+      console.error("Error updating progress:", error);
+    }
+  };
+
+  const runBatchTranscribe = async () => {
+    try {
+      setLoading(true);
+      const res = await axios.post(`${API_BASE}/transcribe-all`);
+      alert(`Batch results: ${res.data.transcribed.length} success, ${res.data.failed.length} failed.`);
+      fetchInitialData();
+    } catch (error) {
+      console.error("Batch transcription failed:", error);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleDubbing = async () => {
+    if (!currentLesson) return;
+
+    setProcessingDub(true);
+
+    try {
+      console.log('🎬 Starting async dubbing...');
+
+      // Call async endpoint - returns immediately with job ID
+      const response = await axios.post('http://localhost:3000/api/dub-async', {
+        video_path: currentLesson.path,
+        voice: 'vi-VN-HoaiMyNeural'
+      });
+
+      const jobId = response.data.job_id;
+      console.log(`🚀 Dubbing job started: ${jobId}`);
+
+      // Connect to SSE endpoint for progress updates
+      const eventSource = new EventSource(`http://localhost:3000/api/dub-progress/${jobId}`);
+
+      eventSource.onmessage = (event) => {
+        const data = JSON.parse(event.data);
+        console.log('📊 Progress:', data);
+
+        if (data.status === 'complete') {
+          console.log('✅ Dubbing complete!');
+
+          // Update lesson with dubbed audio
+          setCurrentLesson({
+            ...currentLesson,
+            has_dubbed: true,
+            dubbed_audio: data.audio_path
+          });
+
+          // Reload lessons to update has_dubbed flag
+          fetchInitialData();
+
+          // Load Vietnamese subtitles
+          loadSubtitles();
+
+          eventSource.close();
+          setProcessingDub(false);
+        } else if (data.status === 'error') {
+          console.error('❌ Dubbing error:', data.error);
+          alert(`Lỗi: ${data.error}`);
+          eventSource.close();
+          setProcessingDub(false);
+        }
+      };
+
+      eventSource.onerror = (error) => {
+        console.error('❌ SSE error:', error);
+        eventSource.close();
+        setProcessingDub(false);
+      };
+
+    } catch (error) {
+      console.error('❌ Dubbing failed:', error);
+      alert(`Không thể bắt đầu dubbing: ${error.message}`);
+      setProcessingDub(false);
+    }
+  };
+
+  const handleSingleTranscribe = async () => {
+    if (!currentLesson) return;
+    try {
+      setProcessingSTT(true);
+      const res = await axios.post(`${API_BASE}/transcribe`, { video_path: currentLesson.path });
+      alert("Transcription complete!");
+      fetchInitialData();
+      // Reload lessons to get the new subtitles
+      loadLessons(selectedCourse);
+    } catch (error) {
+      alert(error.response?.data?.detail || "Transcription failed");
+    } finally {
+      setProcessingSTT(false);
+    }
+  };
+
+  useEffect(() => {
+    const video = videoRef.current;
+    const audio = audioRef.current;
+    if (!video || !audio || !useDubbedAudio) return;
+
+    const handlePlay = () => audio.play().catch(e => console.warn('Audio play failed:', e));
+    const handlePause = () => audio.pause();
+    const handleSeeking = () => { audio.currentTime = video.currentTime; };
+    const handleTimeUpdate = () => {
+      // Tighter sync threshold for better precision (0.1s instead of 0.3s)
+      if (Math.abs(audio.currentTime - video.currentTime) > 0.1) {
+        audio.currentTime = video.currentTime;
+      }
+    };
+
+    video.addEventListener('play', handlePlay);
+    video.addEventListener('pause', handlePause);
+    video.addEventListener('seeking', handleSeeking);
+    video.addEventListener('timeupdate', handleTimeUpdate);
+
+    return () => {
+      video.removeEventListener('play', handlePlay);
+      video.removeEventListener('pause', handlePause);
+      video.removeEventListener('seeking', handleSeeking);
+      video.removeEventListener('timeupdate', handleTimeUpdate);
+    };
+  }, [useDubbedAudio, currentLesson]);
+
+  // Reset dubbed audio state when changing lessons
+  useEffect(() => {
+    setUseDubbedAudio(false);
+    loadSubtitles();
+  }, [currentLesson]);
+
+  // Track video time for subtitle highlighting
+  useEffect(() => {
+    const video = videoRef.current;
+    if (!video) return;
+
+    const handleTimeUpdate = () => {
+      setCurrentTime(video.currentTime);
+    };
+
+    video.addEventListener('timeupdate', handleTimeUpdate);
+    return () => video.removeEventListener('timeupdate', handleTimeUpdate);
+  }, [currentLesson]);
+
+  // Force enable Vietnamese subtitles when available
+  useEffect(() => {
+    const video = videoRef.current;
+    if (!video || !currentLesson || !currentLesson.has_dubbed) return;
+
+    const enableVietnameseSubtitles = () => {
+      if (video.textTracks && video.textTracks.length > 0) {
+        for (let i = 0; i < video.textTracks.length; i++) {
+          const track = video.textTracks[i];
+          if (track.language === 'vi') {
+            track.mode = 'showing';
+            console.log('✅ Enabled Vietnamese subtitles');
+          } else {
+            track.mode = 'disabled';
+          }
+        }
+      }
+    };
+
+    // Try immediately
+    enableVietnameseSubtitles();
+
+    // Also try after a short delay to ensure tracks are loaded
+    const timer = setTimeout(enableVietnameseSubtitles, 500);
+
+    // Listen for track changes
+    const handleLoadedMetadata = () => enableVietnameseSubtitles();
+    video.addEventListener('loadedmetadata', handleLoadedMetadata);
+
+    return () => {
+      clearTimeout(timer);
+      video.removeEventListener('loadedmetadata', handleLoadedMetadata);
+    };
+  }, [currentLesson]);
+
+  // Track fullscreen changes
+  useEffect(() => {
+    const handleFullscreenChange = () => {
+      const isNowFullscreen = !!(
+        document.fullscreenElement ||
+        document.webkitFullscreenElement ||
+        document.mozFullScreenElement ||
+        document.msFullscreenElement
+      );
+      setIsFullscreen(isNowFullscreen);
+    };
+
+    document.addEventListener('fullscreenchange', handleFullscreenChange);
+    document.addEventListener('webkitfullscreenchange', handleFullscreenChange);
+    document.addEventListener('mozfullscreenchange', handleFullscreenChange);
+    document.addEventListener('MSFullscreenChange', handleFullscreenChange);
+
+    return () => {
+      document.removeEventListener('fullscreenchange', handleFullscreenChange);
+      document.removeEventListener('webkitfullscreenchange', handleFullscreenChange);
+      document.removeEventListener('mozfullscreenchange', handleFullscreenChange);
+      document.removeEventListener('MSFullscreenChange', handleFullscreenChange);
+    };
+  }, []);
+
+  const parseSrtTime = (timeStr) => {
+    // Parse both 00:00:01,850 and 00:00:01.850 formats
+    // Replace comma with dot for consistent parsing
+    const normalized = timeStr.trim().replace(',', '.');
+    const parts = normalized.split(':');
+
+    if (parts.length === 3) {
+      const hours = parseInt(parts[0]) || 0;
+      const minutes = parseInt(parts[1]) || 0;
+      const seconds = parseFloat(parts[2]) || 0;
+      return hours * 3600 + minutes * 60 + seconds;
+    }
+
+    console.warn('Invalid SRT timestamp:', timeStr);
+    return 0;
+  };
+
+  const loadSubtitles = async () => {
+    if (!currentLesson || currentLesson.type !== 'video' || !currentLesson.has_subtitle) {
+      setSubtitles([]);
+      setVietnameseSubtitles([]);
+      console.log('❌ No subtitles to load');
+      return;
+    }
+
+    try {
+      // Load English subtitles
+      const srtPath = currentLesson.path.replace(/\.[^.]+$/, '.srt');
+      const response = await fetch(`http://localhost:3000/media/${srtPath}`);
+      const text = await response.text();
+
+      console.log('📝 Loading EN subtitles from:', srtPath);
+
+      // Parse SRT - normalize line endings first (handle Windows \r\n)
+      const normalizedText = text.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
+      const blocks = normalizedText.split('\n\n').filter(b => b.trim());
+      const parsed = [];
+
+      for (const block of blocks) {
+        const lines = block.split('\n');
+        if (lines.length >= 3) {
+          const timeLine = lines[1];
+          if (timeLine.includes('-->')) {
+            const [start, end] = timeLine.split('-->').map(t => t.trim());
+            const subtitle = {
+              start: parseSrtTime(start),
+              end: parseSrtTime(end),
+              text: lines.slice(2).join(' ')
+            };
+            parsed.push(subtitle);
+          }
+        }
+      }
+
+      setSubtitles(parsed);
+      console.log(`✅ Loaded ${parsed.length} EN subtitles`);
+
+      // Load Vietnamese subtitles if available
+      if (currentLesson.has_dubbed) {
+        try {
+          const viSrtPath = currentLesson.path.replace(/\.[^.]+$/, '_vi.srt');
+          console.log('📝 Loading VI subtitles from:', viSrtPath);
+
+          const viResponse = await fetch(`http://localhost:3000/media/${viSrtPath}`);
+
+          if (!viResponse.ok) {
+            throw new Error(`HTTP ${viResponse.status}: ${viResponse.statusText}`);
+          }
+
+          const viText = await viResponse.text();
+          console.log('📝 VI SRT file loaded, length:', viText.length);
+
+          // Normalize line endings for VI subtitles too
+          const normalizedViText = viText.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
+          const viBlocks = normalizedViText.split('\n\n').filter(b => b.trim());
+          const viParsed = [];
+
+          for (const block of viBlocks) {
+            const lines = block.split('\n');
+            if (lines.length >= 3) {
+              const timeLine = lines[1];
+              if (timeLine.includes('-->')) {
+                const [start, end] = timeLine.split('-->').map(t => t.trim());
+                const subtitle = {
+                  start: parseSrtTime(start),
+                  end: parseSrtTime(end),
+                  text: lines.slice(2).join(' ')
+                };
+                viParsed.push(subtitle);
+              }
+            }
+          }
+
+          setVietnameseSubtitles(viParsed);
+          setSubtitleLanguage('vi'); // Default to Vietnamese if available
+          console.log(`✅ Loaded ${viParsed.length} VI subtitles, language set to VI`);
+        } catch (error) {
+          console.error('❌ Failed to load Vietnamese subtitles:', error);
+          setVietnameseSubtitles([]);
+          setSubtitleLanguage('en');
+        }
+      } else {
+        console.log('⚠️ No dubbing available, VI subtitles not loaded');
+        setVietnameseSubtitles([]);
+        setSubtitleLanguage('en');
+      }
+    } catch (error) {
+      console.error('❌ Failed to load subtitles:', error);
+      setSubtitles([]);
+      setVietnameseSubtitles([]);
+    }
+  };
+
+  return (
+    <div className="min-h-screen bg-gradient-to-br from-slate-950 via-slate-900 to-blue-950 text-white">
+      {/* Sidebar */}
+      <div className="fixed left-0 top-0 h-screen w-64 glass-panel-solid p-6 flex flex-col">
+        <div className="p-6">
+          <h1 className="text-xl font-bold bg-gradient-to-r from-blue-400 to-purple-500 bg-clip-text text-transparent flex items-center gap-2">
+            <PlayCircle className="text-blue-500" /> AI HUB
+          </h1>
+        </div>
+
+        <nav className="flex-1 px-4 space-y-2">
+          <TabButton
+            active={activeTab === 'dashboard'}
+            onClick={() => setActiveTab('dashboard')}
+            icon={<TrendingUp size={20} />}
+            label="Dashboard"
+          />
+          <TabButton
+            active={activeTab === 'courses'}
+            onClick={() => setActiveTab('courses')}
+            icon={<Library size={20} />}
+            label="Courses"
+          />
+          <TabButton
+            active={activeTab === 'stt'}
+            onClick={() => setActiveTab('stt')}
+            icon={<Mic size={20} />}
+            label="Speech to Text"
+          />
+          <TabButton
+            active={activeTab === 'dubbing'}
+            onClick={() => setActiveTab('dubbing')}
+            icon={<Languages size={20} />}
+            label="AI Dubbing"
+          />
+          <TabButton
+            active={activeTab === 'progress'}
+            onClick={() => setActiveTab('progress')}
+            icon={<CheckCircle2 size={20} />}
+            label="Learning Progress"
+          />
+        </nav>
+
+        <div className="p-4 border-t border-white/5">
+          <button
+            onClick={() => setActiveTab('add-folder')}
+            className="w-full glass-panel py-3 px-4 flex items-center justify-center gap-2 hover:bg-white/5 transition-all"
+          >
+            <FolderPlus size={20} className="text-blue-400" />
+            <span className="font-medium">Add Folder</span>
+          </button>
+        </div>
+      </div>
+
+      {/* Main Content */}
+      <main className="ml-64 min-h-screen p-8 overflow-y-auto">
+        <header className="flex justify-between items-center mb-8">
+          <div>
+            <h2 className="text-2xl font-bold capitalize">{activeTab}</h2>
+            <p className="text-slate-400 text-sm">Welcome back to your learning journey</p>
+          </div>
+          <div className="flex items-center gap-4">
+            <div className="px-4 py-2 glass-panel flex items-center gap-2 text-sm">
+              <span className="w-2 h-2 rounded-full bg-green-500 animate-pulse"></span>
+              Backend Active
+            </div>
+            <button className="p-2 glass-panel hover:bg-white/5 transition-colors">
+              <Settings size={20} className="text-slate-400" />
+            </button>
+          </div>
+        </header>
+
+        <AnimatePresence mode="wait">
+          {activeTab === 'courses' && (
+            <motion.div
+              key="courses"
+              initial={{ opacity: 0, y: 20 }}
+              animate={{ opacity: 1, y: 0 }}
+              exit={{ opacity: 0, y: -20 }}
+              className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6"
+            >
+              {courses.map(course => (
+                <div
+                  key={course.id}
+                  className="glass-panel card group cursor-pointer"
+                  onClick={() => {
+                    loadLessons(course);
+                    setActiveTab('lessons');
+                  }}
+                >
+                  <div className="flex justify-between items-start mb-4">
+                    <div className="p-3 bg-blue-500/10 rounded-xl text-blue-400 group-hover:scale-110 transition-transform">
+                      <Library size={24} />
+                    </div>
+                    <span className="badge badge-video">{course.video_count} Videos</span>
+                  </div>
+                  <h3 className="text-lg font-bold mb-1">{course.name}</h3>
+                  <p className="text-slate-500 text-sm mb-4 truncate">{course.path}</p>
+
+                  <div className="mt-4 pt-4 border-t border-white/5 flex justify-between items-center">
+                    <span className="text-xs text-slate-400">Total: {course.total_lessons} items</span>
+                    <PlayCircle className="text-blue-500 opacity-0 group-hover:opacity-100 transition-opacity" size={20} />
+                  </div>
+                </div>
+              ))}
+            </motion.div>
+          )}
+
+          {activeTab === 'lessons' && (
+            <motion.div
+              key="lessons"
+              initial={{ opacity: 0, x: 20 }}
+              animate={{ opacity: 1, x: 0 }}
+              className="h-full flex flex-col"
+            >
+              <div className="flex justify-between items-center mb-6">
+                <div>
+                  <button
+                    onClick={() => setActiveTab('courses')}
+                    className="text-blue-400 hover:text-blue-300 flex items-center gap-2 mb-2 px-0"
+                  >
+                    &larr; Back to Library
+                  </button>
+                  <h3 className="text-xl font-bold">{selectedCourse?.name}</h3>
+                </div>
+                {currentLesson && (
+                  <div className="text-right">
+                    <p className="text-sm font-medium text-blue-400">Now Playing</p>
+                    <p className="text-xs text-slate-400 truncate max-w-[200px]">{currentLesson.title}</p>
+                  </div>
+                )}
+              </div>
+
+              <div className="study-container">
+                {/* Center: Video Player */}
+                <div ref={videoContainerRef} className="video-section glass-panel" style={{ position: 'relative' }}>
+                  {currentLesson && currentLesson.type === 'video' ? (
+                    <>
+                      <video
+                        ref={videoRef}
+                        controls
+                        autoPlay
+                        muted={useDubbedAudio}
+                        key={currentLesson.path}
+                        src={`http://localhost:3000/media/${currentLesson.path}`}
+                        className="w-full h-full"
+                        crossOrigin="anonymous"
+                      />
+
+                      {/* Custom Subtitle Overlay (YouTube style) - Works in fullscreen */}
+                      {showSubtitles && (subtitles.length > 0 || vietnameseSubtitles.length > 0) && (() => {
+                        const currentSubs = subtitleLanguage === 'vi' ? vietnameseSubtitles : subtitles;
+                        const currentSub = currentSubs.find(sub => currentTime >= sub.start && currentTime <= sub.end);
+
+                        return currentSub ? (
+                          <div style={{
+                            position: isFullscreen ? 'fixed' : 'absolute',
+                            bottom: isFullscreen ? '80px' : '60px',
+                            left: '50%',
+                            transform: 'translateX(-50%)',
+                            background: 'rgba(0,0,0,0.8)',
+                            color: 'white',
+                            padding: isFullscreen ? '12px 20px' : '8px 16px',
+                            borderRadius: '4px',
+                            fontSize: isFullscreen ? '24px' : '18px',
+                            fontWeight: '500',
+                            maxWidth: '80%',
+                            textAlign: 'center',
+                            lineHeight: '1.4',
+                            pointerEvents: 'none',
+                            zIndex: isFullscreen ? 9999 : 10
+                          }}>
+                            {currentSub.text}
+                          </div>
+                        ) : null;
+                      })()}
+
+                      {/* Subtitle Controls */}
+                      {(subtitles.length > 0 || vietnameseSubtitles.length > 0) && (
+                        <div style={{
+                          position: isFullscreen ? 'fixed' : 'absolute',
+                          bottom: '16px',
+                          right: '16px',
+                          display: 'flex',
+                          gap: '8px',
+                          zIndex: isFullscreen ? 9999 : 11
+                        }}>
+                          {/* CC Toggle */}
+                          <button
+                            onClick={() => setShowSubtitles(!showSubtitles)}
+                            title={showSubtitles ? "Tắt phụ đề" : "Bật phụ đề"}
+                            style={{
+                              width: '40px',
+                              height: '40px',
+                              borderRadius: '4px',
+                              border: 'none',
+                              background: showSubtitles ? 'rgba(255,255,255,0.9)' : 'rgba(0,0,0,0.6)',
+                              color: showSubtitles ? '#000' : '#fff',
+                              cursor: 'pointer',
+                              fontSize: '14px',
+                              fontWeight: '600',
+                              transition: 'all 0.2s'
+                            }}
+                          >
+                            CC
+                          </button>
+
+                          {/* Language Switch (only if Vietnamese available) */}
+                          {vietnameseSubtitles.length > 0 && showSubtitles && (
+                            <button
+                              onClick={() => setSubtitleLanguage(subtitleLanguage === 'en' ? 'vi' : 'en')}
+                              title={subtitleLanguage === 'en' ? "Chuyển sang tiếng Việt" : "Switch to English"}
+                              style={{
+                                padding: '8px 12px',
+                                borderRadius: '4px',
+                                border: 'none',
+                                background: 'rgba(255,255,255,0.9)',
+                                color: '#000',
+                                cursor: 'pointer',
+                                fontSize: '13px',
+                                fontWeight: '600',
+                                transition: 'all 0.2s'
+                              }}
+                            >
+                              {subtitleLanguage === 'en' ? 'EN' : 'VI'}
+                            </button>
+                          )}
+                          {vietnameseSubtitles.length === 0 && showSubtitles && (
+                            <button
+                              onClick={() => {
+                                alert('Vui lòng tạo lồng tiếng tiếng Việt trước (nút Languages)');
+                              }}
+                              title="Chuất tạo lồng tiếng tiếng Việt"
+                              style={{
+                                padding: '8px 12px',
+                                borderRadius: '4px',
+                                border: 'none',
+                                background: 'rgba(128,128,128,0.6)',
+                                color: '#fff',
+                                cursor: 'pointer',
+                                fontSize: '13px',
+                                fontWeight: '600',
+                                opacity: 0.7
+                              }}
+                            >
+                              VI
+                            </button>
+                          )}
+                        </div>
+                      )}
+
+                      {useDubbedAudio && currentLesson.has_dubbed && (
+                        <audio
+                          ref={audioRef}
+                          src={`http://localhost:3000/media/${currentLesson.dubbed_audio}`}
+                          style={{ display: 'none' }}
+                        />
+                      )}
+
+                      {/* Control Buttons - Always Visible */}
+                      <div style={{
+                        position: 'absolute',
+                        top: '16px',
+                        right: '16px',
+                        display: 'flex',
+                        flexDirection: 'column',
+                        gap: '12px',
+                        zIndex: 10
+                      }}>
+                        {/* Dubbing Toggle Button */}
+                        <button
+                          onClick={() => {
+                            if (currentLesson.has_dubbed) {
+                              setUseDubbedAudio(!useDubbedAudio);
+                            } else if (!currentLesson.has_subtitle) {
+                              alert("Vui lòng tạo phụ đề trước (nút Microphone)");
+                            } else {
+                              handleDubbing();
+                            }
+                          }}
+                          disabled={processingDub}
+                          title={
+                            currentLesson.has_dubbed
+                              ? (useDubbedAudio ? "Tắt lồng tiếng" : "Bật lồng tiếng")
+                              : (!currentLesson.has_subtitle ? "Cần phụ đề trước" : "Tạo lồng tiếng AI")
+                          }
+                          style={{
+                            width: '48px',
+                            height: '48px',
+                            borderRadius: '50%',
+                            border: 'none',
+                            cursor: processingDub || !currentLesson.has_subtitle && !currentLesson.has_dubbed ? 'not-allowed' : 'pointer',
+                            display: 'flex',
+                            alignItems: 'center',
+                            justifyContent: 'center',
+                            background: processingDub
+                              ? 'rgb(59, 130, 246)'
+                              : currentLesson.has_dubbed
+                                ? (useDubbedAudio ? 'rgb(34, 197, 94)' : 'rgb(37, 99, 235)')
+                                : (!currentLesson.has_subtitle ? 'rgb(71, 85, 105)' : 'rgb(37, 99, 235)'),
+                            color: 'white',
+                            boxShadow: '0 4px 12px rgba(0,0,0,0.3)',
+                            transition: 'all 0.2s',
+                            opacity: !currentLesson.has_subtitle && !currentLesson.has_dubbed ? 0.5 : 1
+                          }}
+                        >
+                          {processingDub ? (
+                            <motion.div animate={{ rotate: 360 }} transition={{ repeat: Infinity, duration: 1 }}>
+                              <RotateCw size={20} />
+                            </motion.div>
+                          ) : (
+                            <Languages size={20} />
+                          )}
+                        </button>
+
+                        {/* Transcription Button */}
+                        <button
+                          onClick={handleSingleTranscribe}
+                          disabled={processingSTT || currentLesson.has_subtitle}
+                          title={currentLesson.has_subtitle ? "Đã có phụ đề" : "Tạo phụ đề"}
+                          style={{
+                            width: '48px',
+                            height: '48px',
+                            borderRadius: '50%',
+                            border: 'none',
+                            cursor: processingSTT || currentLesson.has_subtitle ? 'not-allowed' : 'pointer',
+                            display: 'flex',
+                            alignItems: 'center',
+                            justifyContent: 'center',
+                            background: processingSTT
+                              ? 'rgb(245, 158, 11)'
+                              : currentLesson.has_subtitle
+                                ? 'rgb(34, 197, 94)'
+                                : 'rgb(245, 158, 11)',
+                            color: 'white',
+                            boxShadow: '0 4px 12px rgba(0,0,0,0.3)',
+                            transition: 'all 0.2s',
+                            opacity: currentLesson.has_subtitle ? 0.7 : 1
+                          }}
+                        >
+                          {processingSTT ? (
+                            <motion.div animate={{ rotate: 360 }} transition={{ repeat: Infinity, duration: 1 }}>
+                              <RotateCw size={20} />
+                            </motion.div>
+                          ) : (
+                            <Mic size={20} />
+                          )}
+                        </button>
+                      </div>
+                    </>
+                  ) : currentLesson && currentLesson.type === 'pdf' ? (
+                    <iframe
+                      src={`http://localhost:3000/media/${currentLesson.path}`}
+                      className="w-full h-full border-0"
+                      title="PDF Viewer"
+                    />
+                  ) : (
+                    <div className="flex items-center justify-center h-full text-gray-400">
+                      <p>Select a lesson to start</p>
+                    </div>
+                  )}
+                </div>
+
+                {/* Transcript Panel - Below Video */}
+                {currentLesson && currentLesson.type === 'video' && subtitles.length > 0 && (
+                  <div className="glass-panel" style={{
+                    marginTop: '16px',
+                    maxHeight: '200px',
+                    overflowY: 'auto',
+                    padding: '16px'
+                  }}>
+                    <h3 style={{
+                      fontSize: '14px',
+                      fontWeight: '600',
+                      marginBottom: '12px',
+                      color: 'rgba(255,255,255,0.9)'
+                    }}>📝 Bản chép lời (Transcript)</h3>
+                    <div ref={transcriptRef} style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
+                      {subtitles.map((sub, idx) => {
+                        const isActive = currentTime >= sub.start && currentTime <= sub.end;
+                        const minutes = Math.floor(sub.start / 60);
+                        const seconds = Math.floor(sub.start % 60);
+
+                        // Auto-scroll to active subtitle
+                        if (isActive && transcriptRef.current) {
+                          const activeElement = transcriptRef.current.children[idx];
+                          if (activeElement) {
+                            activeElement.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+                          }
+                        }
+
+                        return (
+                          <div
+                            key={idx}
+                            onClick={() => {
+                              if (videoRef.current) {
+                                videoRef.current.currentTime = sub.start;
+                              }
+                            }}
+                            style={{
+                              display: 'flex',
+                              gap: '12px',
+                              padding: '8px 12px',
+                              borderRadius: '6px',
+                              cursor: 'pointer',
+                              background: isActive
+                                ? 'rgba(59, 130, 246, 0.2)'
+                                : 'rgba(255,255,255,0.03)',
+                              borderLeft: isActive
+                                ? '3px solid rgb(59, 130, 246)'
+                                : '3px solid transparent',
+                              transition: 'all 0.2s'
+                            }}
+                          >
+                            <span style={{
+                              minWidth: '50px',
+                              fontSize: '12px',
+                              color: isActive ? 'rgb(96, 165, 250)' : 'rgba(255,255,255,0.5)',
+                              fontWeight: '500'
+                            }}>
+                              {minutes}:{seconds.toString().padStart(2, '0')}
+                            </span>
+                            <p style={{
+                              fontSize: '14px',
+                              lineHeight: '1.5',
+                              color: isActive ? 'rgba(255,255,255,0.95)' : 'rgba(255,255,255,0.7)',
+                              fontWeight: isActive ? '500' : '400'
+                            }}>
+                              {sub.text}
+                            </p>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </div>
+                )}
+
+                {/* Right: Lesson List */}
+                <div className="lesson-list-sidebar overflow-y-auto premium-scroll px-2">
+                  <h4 className="text-sm uppercase tracking-widest text-slate-500 font-bold mb-2">Playlist</h4>
+                  {lessons
+                    .filter(l => l.type !== 'subtitle')
+                    .map(lesson => {
+                      const isCompleted = stats?.progress?.[lesson.path]?.completed;
+                      const isActive = currentLesson?.path === lesson.path;
+
+                      return (
+                        <div
+                          key={lesson.path}
+                          className={`lesson-item ${isActive ? 'active' : ''}`}
+                          onClick={() => setCurrentLesson(lesson)}
+                        >
+                          <div className="flex gap-3">
+                            <div className={`mt-1 shrink-0 p-1.5 rounded-lg ${lesson.type === 'video' ? 'bg-blue-500/10 text-blue-400' : 'bg-slate-500/10 text-slate-400'}`}>
+                              {lesson.type === 'video' ? <PlayCircle size={16} /> : <FileText size={16} />}
+                            </div>
+                            <div className="flex-1 min-w-0">
+                              <h5 className={`text-sm font-medium leading-tight truncate ${isCompleted ? 'text-slate-500' : ''}`}>
+                                {lesson.title}
+                              </h5>
+                              <div className="flex items-center gap-2 mt-1">
+                                {isCompleted && <CheckCircle2 size={12} className="text-green-500" />}
+                                <span className="text-[10px] text-slate-500 uppercase">{lesson.type}</span>
+                              </div>
+                            </div>
+                            <button
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                toggleProgress(lesson);
+                              }}
+                              className={`shrink-0 p-1 rounded transition-colors ${isCompleted ? 'text-green-500' : 'text-slate-700 hover:text-slate-400'}`}
+                            >
+                              <CheckCircle2 size={16} />
+                            </button>
+                          </div>
+                        </div>
+                      );
+                    })}
+                </div>
+              </div>
+            </motion.div>
+          )}
+
+          {activeTab === 'stt' && (
+            <motion.div
+              key="stt"
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              className="space-y-6"
+            >
+              <div className="glass-panel p-6 border-l-4 border-amber-500 flex items-center justify-between">
+                <div>
+                  <h3 className="text-xl font-bold flex items-center gap-2">
+                    <AlertCircle className="text-amber-500" /> Transcribe Workspace
+                  </h3>
+                  <p className="text-slate-400 mt-1">Found {videosWithoutSrt.length} videos needing subtitles</p>
+                </div>
+                <button
+                  onClick={runBatchTranscribe}
+                  className="btn btn-primary"
+                  disabled={loading || videosWithoutSrt.length === 0}
+                >
+                  {loading ? 'Processing...' : 'Start Batch Process'}
+                </button>
+              </div>
+
+              <div className="grid gap-4">
+                {videosWithoutSrt.map(video => (
+                  <div key={video.path} className="glass-panel p-4 flex items-center justify-between group">
+                    <div className="flex items-center gap-4">
+                      <div className="p-2 bg-slate-500/10 rounded-lg text-slate-500 group-hover:text-amber-500 transition-colors">
+                        <Mic size={20} />
+                      </div>
+                      <div>
+                        <h4 className="font-medium">{video.name}</h4>
+                        <p className="text-xs text-slate-500">{video.course}</p>
+                      </div>
+                    </div>
+                    <div className="flex gap-2">
+                      <button className="btn btn-ghost text-xs">Preview</button>
+                      <button className="btn btn-primary text-xs px-4">Transcribe</button>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </motion.div>
+          )}
+
+          {activeTab === 'dubbing' && (
+            <motion.div
+              key="dubbing"
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              className="space-y-6"
+            >
+              <div className="glass-panel p-6 border-l-4 border-blue-500 flex items-center justify-between">
+                <div>
+                  <h3 className="text-xl font-bold flex items-center gap-2">
+                    <Languages className="text-blue-500" /> AI Dubbing Center
+                  </h3>
+                  <p className="text-slate-400 mt-1">Generate Vietnamese voices for your collection</p>
+                </div>
+                <button className="btn btn-primary">Scan Ready Videos</button>
+              </div>
+
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                {lessons.filter(l => l.has_subtitle).map(video => (
+                  <div key={video.path} className="glass-panel p-4 flex flex-col gap-4">
+                    <div className="flex items-center gap-4">
+                      <div className="p-2 bg-blue-500/10 rounded-lg text-blue-400">
+                        <PlayCircle size={20} />
+                      </div>
+                      <div className="flex-1 min-w-0">
+                        <h4 className="font-medium truncate">{video.title}</h4>
+                        <span className="badge badge-srt mt-1 inline-block">Ready to Dub</span>
+                      </div>
+                    </div>
+                    <div className="flex gap-2 mt-2">
+                      <button className="btn btn-ghost flex-1 text-xs justify-center">Male Voice</button>
+                      <button className="btn btn-ghost flex-1 text-xs justify-center">Female Voice</button>
+                      <button className="btn btn-primary text-xs">Dub</button>
+                    </div>
+                  </div>
+                ))}
+                {lessons.filter(l => l.has_subtitle).length === 0 && (
+                  <div className="col-span-full p-12 text-center text-slate-500 italic">
+                    Open a course to see dubbing candidates
+                  </div>
+                )}
+              </div>
+            </motion.div>
+          )}
+
+          {activeTab === 'dashboard' && stats && (
+            <motion.div
+              key="dashboard"
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6"
+            >
+              <StatCard
+                label="Overall Progress"
+                value={`${stats.overall_percentage}%`}
+                icon={<CheckCircle2 className="text-green-500" />}
+                color="text-green-500"
+              />
+              <StatCard
+                label="Videos Completed"
+                value={`${stats.completed_videos} / ${stats.total_videos}`}
+                icon={<PlayCircle className="text-blue-500" />}
+                color="text-blue-500"
+              />
+              <StatCard
+                label="Exercises Finished"
+                value={`${stats.completed_exercises} / ${stats.total_exercises}`}
+                icon={<FileText className="text-purple-500" />}
+                color="text-purple-500"
+              />
+              <StatCard
+                label="Missing SRT"
+                value={videosWithoutSrt.length}
+                icon={<AlertCircle className="text-amber-500" />}
+                color="text-amber-500"
+              />
+            </motion.div>
+          )}
+        </AnimatePresence>
+      </main>
+    </div>
+  );
+}
+
+function TabButton({ active, onClick, icon, label }) {
+  return (
+    <button
+      onClick={onClick}
+      className={`w-full flex items-center gap-3 px-4 py-3 rounded-xl transition-all ${active
+        ? 'bg-blue-500/10 text-blue-400 border border-blue-500/20'
+        : 'text-slate-400 hover:bg-white/5 hover:text-white'
+        }`}
+    >
+      {icon}
+      <span className="font-medium text-sm">{label}</span>
+      {active && <motion.div layoutId="activeTab" className="ml-auto w-1 h-4 bg-blue-500 rounded-full" />}
+    </button>
+  );
+}
+
+function StatCard({ label, value, icon, color }) {
+  return (
+    <div className="glass-panel p-6 flex flex-col items-center text-center">
+      <div className="p-4 bg-white/5 rounded-2xl mb-4">
+        {React.cloneElement(icon, { size: 32 })}
+      </div>
+      <p className="text-slate-400 text-sm mb-1 uppercase tracking-wider">{label}</p>
+      <h4 className={`text-3xl font-bold ${color}`}>{value}</h4>
+    </div>
+  );
+}
+
+export default App;
