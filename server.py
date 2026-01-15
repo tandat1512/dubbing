@@ -27,6 +27,8 @@ import time
 
 # For Server-Sent Events
 from sse_starlette.sse import EventSourceResponse
+import yt_dlp
+from deep_translator import GoogleTranslator
 
 app = FastAPI(title="AI Learning Platform")
 
@@ -41,6 +43,7 @@ app.add_middleware(
 
 # Global job tracking for progressive dubbing
 dubbing_jobs: Dict[str, Dict] = {}
+download_jobs: Dict[str, Dict] = {}
 # Job structure:
 # {
 #   'job_id': {
@@ -115,69 +118,76 @@ class EdgeTTSEngine:
         
         return text.strip()
 
-    async def generate_audio(self, text: str, start_time: float, end_time: float) -> bytes:
-        """Generate audio for a segment, adjusting speed ONLY if audio is too long"""
-        # Preprocess text for better quality
-        text = self._preprocess_text(text)
-        
-        duration_srt = end_time - start_time
-        if duration_srt <= 0:
-            logger.warning(f"Invalid timing: start={start_time}, end={end_time}")
-            return await self._synthesize(text, rate="+0%")
-
-        logger.debug(f"🎵 Segment [{start_time:.2f}s - {end_time:.2f}s] ({duration_srt:.2f}s): {text[:50]}...")
-
-        
-        # Generate audio at normal speed first
-        original_audio = await self._synthesize(text, rate="+0%")
-        if not original_audio:
-            logger.error("Failed to synthesize audio")
-            return b""
-        
-        # Save to temp file to measure duration
-        tmp_path = None
+    async def _get_audio_duration_from_bytes(self, audio_data: bytes) -> float:
+        """Get audio duration from bytes using ffprobe via temp file"""
         try:
-            with tempfile.NamedTemporaryFile(suffix=".mp3", delete=False) as tmp:
-                tmp.write(original_audio)
+            with tempfile.NamedTemporaryFile(suffix='.mp3', delete=False) as tmp:
+                tmp.write(audio_data)
                 tmp_path = tmp.name
             
-            duration_audio = self._get_duration(tmp_path)
-            if duration_audio <= 0:
-                logger.warning("Could not measure audio duration, using original")
-                return original_audio
+            duration = self._get_duration(tmp_path)
+            os.remove(tmp_path)
+            return duration
+        except Exception as e:
+            logger.warning(f"Duration calc error: {e}")
+            return 0.0
 
-            # Only speed up if audio is longer than SRT slot
-            # Never slow down - keep natural speed
-            if duration_audio > duration_srt:
-                # SPEED UP if audio is longer than SRT slot
-                ratio = duration_audio / duration_srt
-                
-                # Cap speed up at 30% to prevent artifacts (even if it causes drift/overflow)
-                # If ratio > 1.3, we just accept the drift rather than destroying audio quality
-                safe_ratio = min(ratio, 1.3)
-                
-                percentage = int((safe_ratio - 1) * 100)
-                if percentage > 0:
-                    rate_str = f"+{percentage}%"
-                    logger.info(f"⚡ Speed up: {duration_audio:.2f}s → {duration_srt:.2f}s (rate: {rate_str}, capped at +30%)")
-                    
-                    final_audio = await self._synthesize(text, rate=rate_str)
-                    if final_audio:
-                        return final_audio
-                    else:
-                        return original_audio
-                else:
-                    return original_audio
-            else:
-                # Audio fits or is shorter - use original (silence padding handled in concat)
-                logger.debug(f"✅ Audio {duration_audio:.2f}s ≤ slot {duration_srt:.2f}s")
-                return original_audio
-                
-        finally:
-            if tmp_path and os.path.exists(tmp_path):
-                os.unlink(tmp_path)
+    async def generate_audio(self, text: str, start_time: float, end_time: float, drift_compensation: float = 0.0) -> bytes:
+        """Generate audio with dynamic speed to fit segment duration.
+        Calculates the required rate so dubbed audio fits within the segment time.
+        """
+        segment_duration = end_time - start_time
+        text = self._preprocess_text(text)
+        
+        if not text.strip():
+            return b""
+        
+        # Step 1: Generate at normal speed (+0%) to get actual duration
+        temp_audio = await self._synthesize_no_cache(text, rate="+0%")
+        if not temp_audio:
+            return b""
+        
+        # Step 2: Calculate actual duration
+        actual_duration = await self._get_audio_duration_from_bytes(temp_audio)
+        
+        if actual_duration <= 0:
+            # Fallback: estimate duration based on text length (rough: 5 chars/sec for Vietnamese)
+            actual_duration = len(text) / 5.0
+        
+        # If audio already fits within segment, return as-is
+        if actual_duration <= segment_duration:
+            logger.info(f"  📊 Audio fits: {actual_duration:.2f}s <= {segment_duration:.2f}s (no speedup)")
+            return temp_audio
+        
+        # Step 3: Calculate required rate
+        # If actual=4s, segment=2s → need 2x speed → +100%
+        speed_factor = actual_duration / segment_duration
+        rate_pct = int((speed_factor - 1) * 100)
+        
+        # Cap rate between +0% and +100% for natural speech
+        rate_pct = max(0, min(rate_pct, 100))
+        
+        logger.info(f"  📊 Rate calc: {actual_duration:.2f}s → {segment_duration:.2f}s = +{rate_pct}%")
+        
+        # Step 4: Regenerate with calculated rate
+        rate_str = f"+{rate_pct}%"
+        return await self._synthesize(text, rate=rate_str)
+
+    async def _synthesize_no_cache(self, text: str, rate: str) -> bytes:
+        """Synthesis without cache (for duration estimation)"""
+        try:
+            communicate = edge_tts.Communicate(text, self.voice, rate=rate)
+            audio_data = b""
+            async for chunk in communicate.stream():
+                if chunk["type"] == "audio":
+                    audio_data += chunk["data"]
+            return audio_data
+        except Exception as e:
+            logger.error(f"Synthesis error: {e}")
+            return b""
 
     async def _synthesize(self, text: str, rate: str) -> bytes:
+        """Internal synthesis with cache"""
         cache_key = self._get_cache_key(text, rate)
         if cache_key in _audio_cache: return _audio_cache[cache_key]
         
@@ -185,7 +195,8 @@ class EdgeTTSEngine:
             communicate = edge_tts.Communicate(text, self.voice, rate=rate)
             audio_data = b""
             async for chunk in communicate.stream():
-                if chunk["type"] == "audio": audio_data += chunk["data"]
+                if chunk["type"] == "audio":
+                    audio_data += chunk["data"]
             
             if not audio_data:
                 logger.warning(f"Empty audio for: {text[:20]}")
@@ -576,324 +587,13 @@ try:
 except ImportError:
     print("⚠️ google-generativeai not installed")
 
-class QuizRequest(BaseModel):
-    subtitles: list  # List of subtitle texts
-    language: str = "vi"  # Target language for questions
-    num_questions: int = 5
-
-class FlashcardRequest(BaseModel):
-    subtitles: list  # List of subtitle texts
-    language: str = "vi"
-    num_cards: int = 10
-
-@app.post("/api/generate-quiz")
-async def generate_quiz(request: QuizRequest):
-    """Generate quiz questions using Gemini AI"""
-    if not GEMINI_AVAILABLE:
-        return {"error": "Gemini AI not available. Set GEMINI_API_KEY in .env", "questions": []}
-    
-    try:
-        # Combine subtitles into context
-        context = "\n".join([s if isinstance(s, str) else s.get('text', '') for s in request.subtitles[:50]])
-        
-        prompt = f"""Bạn là giáo viên tạo câu hỏi trắc nghiệm từ nội dung bài học.
-
-Nội dung (phụ đề video):
-{context}
-
-Hãy tạo {request.num_questions} câu hỏi trắc nghiệm bằng tiếng Việt.
-
-Format JSON (không có markdown):
-[
-  {{
-    "question": "Câu hỏi...",
-    "answers": ["Đáp án A", "Đáp án B", "Đáp án C", "Đáp án D"],
-    "correct": 0,
-    "explanation": "Giải thích ngắn..."
-  }}
-]
-
-Chỉ trả về JSON array, không có text khác."""
-
-        response = gemini_model.generate_content(prompt)
-        text = response.text.strip()
-        
-        # Parse JSON
-        if text.startswith("```"):
-            text = text.split("```")[1]
-            if text.startswith("json"):
-                text = text[4:]
-        
-        questions = json.loads(text)
-        return {"questions": questions, "count": len(questions)}
-        
-    except Exception as e:
-        print(f"❌ Quiz generation error: {e}")
-        return {"error": str(e), "questions": []}
-
-@app.post("/api/generate-flashcards")
-async def generate_flashcards(request: FlashcardRequest):
-    """Generate flashcards using Gemini AI"""
-    if not GEMINI_AVAILABLE:
-        return {"error": "Gemini AI not available. Set GEMINI_API_KEY in .env", "flashcards": []}
-    
-    try:
-        # Combine subtitles into context
-        context = "\n".join([s if isinstance(s, str) else s.get('text', '') for s in request.subtitles[:50]])
-        
-        prompt = f"""Bạn là giáo viên tạo flashcards để giúp học sinh ghi nhớ kiến thức.
-
-Nội dung (phụ đề video):
-{context}
-
-Hãy tạo {request.num_cards} flashcards bằng tiếng Việt.
-- Mặt trước: Câu hỏi ngắn hoặc thuật ngữ
-- Mặt sau: Đáp án hoặc định nghĩa
-
-Format JSON (không có markdown):
-[
-  {{
-    "front": "Mặt trước - câu hỏi/thuật ngữ",
-    "back": "Mặt sau - câu trả lời/định nghĩa"
-  }}
-]
-
-Chỉ trả về JSON array, không có text khác."""
-
-        response = gemini_model.generate_content(prompt)
-        text = response.text.strip()
-        
-        # Parse JSON
-        if text.startswith("```"):
-            text = text.split("```")[1]
-            if text.startswith("json"):
-                text = text[4:]
-        
-        flashcards = json.loads(text)
-        return {"flashcards": flashcards, "count": len(flashcards)}
-        
-    except Exception as e:
-        print(f"❌ Flashcard generation error: {e}")
-        return {"error": str(e), "flashcards": []}
-
-@app.get("/api/gemini-status")
-async def gemini_status():
-    """Check Gemini AI status"""
-    return {
-        "available": GEMINI_AVAILABLE,
-        "model": gemini_model.model_name if gemini_model else None
-    }
-
 # ====== DUBBING LOGIC ======
 
 class DubbingRequest(BaseModel):
     video_path: str
     voice: str = "vi-VN-HoaiMyNeural"
 
-@app.post("/api/dub")
-async def dub_video(request: DubbingRequest):
-    """Dub a video using existing SRT and Edge-TTS"""
-    video_full_path = COURSES_BASE_DIR / request.video_path
-    srt_path = video_full_path.with_suffix('.srt')
-    
-    if not srt_path.exists():
-        raise HTTPException(status_code=404, detail="SRT file not found. Transcribe first.")
-    
-    try:
-        # 1. Parse SRT using regex (more robust)
-        with open(srt_path, 'r', encoding='utf-8') as f:
-            content = f.read()
-        
-        # Regex for SRT block: match number, time, then text until double newline
-        pattern = re.compile(r'(\d+)\s+(\d{2}:\d{2}:\d{2}[,.]\d{3}) --> (\d{2}:\d{2}:\d{2}[,.]\d{3})\s+(.*?)(?=\s*\n\d+\s+\d{2}:\d{2}:\d{2}|$)', re.DOTALL)
-        matches = pattern.findall(content)
-        
-        segments = []
-        for m in matches:
-            segments.append({
-                'start': parse_srt_timestamp(m[1]),
-                'end': parse_srt_timestamp(m[2]),
-                'text': m[3].strip().replace('\n', ' ')
-            })
-        
-        if not segments:
-            raise HTTPException(status_code=400, detail="Could not parse any segments from SRT.")
 
-        logger.info(f"🎬 Dubbing video: {request.video_path} ({len(segments)} segments)")
-
-        # 2. Deep Translate with Gemini in chunks
-        translated_segments = []
-        if GEMINI_AVAILABLE:
-            merged = smart_merge_subtitles(segments)
-            logger.info(f"📊 Merged into {len(merged)} segments for translation")
-            
-            # Chunking to avoid Gemini limits
-            chunk_size = 20
-            for i in range(0, len(merged), chunk_size):
-                chunk = merged[i:i+chunk_size]
-                prompt = f"Dịch các câu sau sang tiếng Việt tự nhiên cho lồng tiếng. Giữ nguyên định dạng JSON array [{{'start': float, 'end': float, 'text': string}}]. Trả về duy nhất JSON array.\n\nNội dung: {json.dumps(chunk, ensure_ascii=False)}"
-                
-                try:
-                    response = gemini_model.generate_content(prompt)
-                    match = re.search(r'\[.*\]', response.text, re.DOTALL)
-                    if match:
-                        translated_chunk = json.loads(match.group())
-                        translated_segments.extend(translated_chunk)
-                    else:
-                        logger.warning(f"Chunk {i//chunk_size} translation failed, falling back")
-                        translated_segments.extend(chunk)
-                except Exception as ex:
-                    logger.error(f"Gemini chunk error: {ex}")
-                    translated_segments.extend(chunk)
-        else:
-            translated_segments = segments
-
-        # 3. Generate Audio for each segment (Parallelized)
-        engine = EdgeTTSEngine(voice=request.voice)
-        
-        async def process_segment(idx, seg):
-            try:
-                if idx % 5 == 0:
-                    logger.info(f"🔊 Task started for segment {idx}/{len(translated_segments)}")
-                return await engine.generate_audio(seg['text'], seg['start'], seg['end'])
-            except Exception as e:
-                logger.error(f"Segment {idx} failed: {e}")
-                return b""
-
-        tasks = [process_segment(i, s) for i, s in enumerate(translated_segments)]
-        audio_segments = await asyncio.gather(*tasks)
-        
-        # Filter out empty segments
-        valid_segments = [(seg, audio) for seg, audio in zip(translated_segments, audio_segments) if audio and len(audio) > 0]
-        
-        if not valid_segments:
-            raise HTTPException(status_code=500, detail="Generated audio is empty.")
-
-        logger.info(f"📝 Creating timeline-accurate audio with sequential playback...")
-        
-        # Build sequential audio with precise silence padding
-        temp_files = []
-        file_list = []  # List of files to concat in order
-        
-        try:
-            current_position = 0.0  # Track current position in timeline
-            
-            for idx, (seg, audio_data) in enumerate(valid_segments):
-                segment_start = seg['start']
-                segment_end = seg['end']
-                segment_duration = segment_end - segment_start
-                
-                # Calculate EXACT silence needed to reach segment start
-                silence_duration = segment_start - current_position
-                
-                logger.debug(f"Segment {idx}: start={segment_start:.2f}s, current_pos={current_position:.2f}s, silence_needed={silence_duration:.2f}s")
-                
-                if silence_duration > 0.05:  # Add silence if gap > 50ms
-                    silence_file = tempfile.NamedTemporaryFile(suffix=f"_silence_{idx}.mp3", delete=False)
-                    silence_file.close()
-                    temp_files.append(silence_file.name)
-                    
-                    # Generate EXACT silence duration
-                    silence_cmd = [
-                        "ffmpeg", "-y", "-f", "lavfi", "-i", "anullsrc=r=44100:cl=stereo",
-                        "-t", f"{silence_duration:.6f}",  # Use high precision
-                        "-q:a", "9", "-acodec", "libmp3lame",
-                        silence_file.name
-                    ]
-                    result = subprocess.run(silence_cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, timeout=10)
-                    if result.returncode == 0:
-                        file_list.append(silence_file.name)
-                        current_position += silence_duration
-                        logger.debug(f"✅ Added {silence_duration:.3f}s silence, now at {current_position:.3f}s")
-                    else:
-                        logger.error(f"Failed to generate silence: {result.stderr.decode()}")
-                elif silence_duration < -0.05:  # Negative gap = overlap!
-                    logger.warning(f"⚠️ Segment {idx} overlap detected: {silence_duration:.2f}s")
-                
-                # Verify we're at the right position
-                position_error = abs(current_position - segment_start)
-                if position_error > 0.1:
-                    logger.warning(f"⚠️ Timeline drift at segment {idx}: expected {segment_start:.2f}s, at {current_position:.2f}s (error: {position_error:.2f}s)")
-                
-                # Save audio segment
-                audio_file = tempfile.NamedTemporaryFile(suffix=f"_audio_{idx}.mp3", delete=False)
-                audio_file.write(audio_data)
-                audio_file.close()
-                temp_files.append(audio_file.name)
-                file_list.append(audio_file.name)
-                
-                # Update position to segment end
-                current_position = segment_end
-                
-                if idx % 10 == 0:
-                    logger.info(f"🎵 Seg {idx+1}/{len(valid_segments)}: [{segment_start:.2f}s - {segment_end:.2f}s]")
-            
-            # Create concat file
-            concat_file = tempfile.NamedTemporaryFile(mode='w', suffix='_concat.txt', delete=False, encoding='utf-8')
-            for f in file_list:
-                # Escape single quotes and wrap path in quotes
-                escaped_path = f.replace("'", "'\\''")
-                concat_file.write(f"file '{escaped_path}'\n")
-            concat_file.close()
-            temp_files.append(concat_file.name)
-            
-            logger.info(f"🔧 Concatenating {len(file_list)} audio pieces...")
-            
-            # Concatenate all files
-            dubbed_audio_path = video_full_path.with_name(f"{video_full_path.stem}_dubbed.mp3")
-            concat_cmd = [
-                "ffmpeg", "-y", "-f", "concat", "-safe", "0",
-                "-i", concat_file.name,
-                "-acodec", "libmp3lame", "-q:a", "2",  # Re-encode to ensure compatibility
-                str(dubbed_audio_path)
-            ]
-            
-            result = subprocess.run(concat_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=120)
-            
-            if result.returncode != 0:
-                logger.error(f"FFmpeg concat failed: {result.stderr.decode()}")
-                raise HTTPException(status_code=500, detail="Failed to create dubbed audio")
-            
-            logger.info(f"✅ Dubbed audio created with sequential playback")
-        
-        finally:
-            # Clean up temp files
-            for temp_file in temp_files:
-                try:
-                    if os.path.exists(temp_file):
-                        os.unlink(temp_file)
-                except Exception as e:
-                    logger.debug(f"Cleanup error: {e}")
-        
-        # Generate Vietnamese SRT file with EXACT same timestamps as English SRT
-        vi_srt_path = video_full_path.with_name(f"{video_full_path.stem}_vi.srt")
-        srt_content = ""
-        
-        # Use translated_segments which already have the ORIGINAL timestamps from English SRT
-        for idx, seg in enumerate(translated_segments, 1):
-            start_time = format_srt_time(seg['start'])
-            end_time = format_srt_time(seg['end'])
-            srt_content += f"{idx}\n{start_time} --> {end_time}\n{seg['text']}\n\n"
-        
-        with open(vi_srt_path, 'w', encoding='utf-8') as f:
-            f.write(srt_content)
-        
-        rel_audio_path = str(dubbed_audio_path.relative_to(COURSES_BASE_DIR)).replace('\\', '/')
-        rel_srt_path = str(vi_srt_path.relative_to(COURSES_BASE_DIR)).replace('\\', '/')
-        logger.info(f"✅ Dubbing complete: {rel_audio_path}")
-        logger.info(f"📝 Vietnamese CC: {rel_srt_path}")
-        logger.info(f"⏱️ Timeline: Audio duration matches SRT timeline exactly")
-
-        return {
-            "status": "success",
-            "audio_path": rel_audio_path,
-            "srt_path": rel_srt_path,
-            "segments": len(translated_segments)
-        }
-        
-    except Exception as e:
-        logger.error(f"❌ Dubbing error: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
 
 
 # ====================
@@ -1151,19 +851,12 @@ async def dub_instant(request: DubbingRequest, background_tasks: BackgroundTasks
         translated_segments = []
         if GEMINI_AVAILABLE:
             try:
-                BATCH_SIZE = 30
+                BATCH_SIZE = 50
                 for batch_start in range(0, len(segments), BATCH_SIZE):
                     batch = segments[batch_start:batch_start + BATCH_SIZE]
-                    prompt = f"Dịch các câu sau sang tiếng Việt tự nhiên cho lồng tiếng. Giữ nguyên định dạng JSON. Trả về duy nhất JSON array.\n\nNội dung: {json.dumps(batch, ensure_ascii=False)}"
-                    response = gemini_model.generate_content(prompt)
-                    match = re.search(r'\[.*\]', response.text, re.DOTALL)
-                    if match:
-                        batch_translated = json.loads(match.group())
-                        translated_segments.extend(batch_translated)
-                        logger.info(f"  Translated batch {batch_start//BATCH_SIZE + 1}: {len(batch_translated)} segments")
-                    else:
-                        # Fallback: use original for this batch
-                        translated_segments.extend(batch)
+                    translated_batch = translate_segments_chunk(batch)
+                    translated_segments.extend(translated_batch)
+                    logger.info(f"  Translated batch {batch_start//BATCH_SIZE + 1}: {len(translated_batch)} segments")
             except Exception as ex:
                 logger.error(f"Gemini error: {ex}")
         
@@ -1202,7 +895,10 @@ async def dub_instant(request: DubbingRequest, background_tasks: BackgroundTasks
                 audio_data = await engine.generate_audio(seg['text'], seg['start'], seg['end'])
                 if audio_data and len(audio_data) > 0:
                     audio_segments.append((seg, audio_data))
-                    logger.info(f"  ✓ Segment {i} generated ({seg['start']:.1f}s - {seg['end']:.1f}s)")
+                    # Estimate duration: size / (bitrate/8) -> 192kbps / 8 = 24KB/s
+                    # This is rough but better than nothing for quick logs
+                    est_duration = len(audio_data) / 24000
+                    logger.info(f"  ✓ Segment {i} generated (SRT: {seg['start']:.1f}-{seg['end']:.1f}s | Audio ~{est_duration:.2f}s)")
             except Exception as ex:
                 logger.error(f"  ✗ Segment {i} failed: {ex}")
         
@@ -1504,180 +1200,79 @@ async def concat_available_segments(job_id: str, job_dir_path: Path):
             except:
                 pass
                 
+        return current_position
+                
     except Exception as e:
         logger.error(f"Concat error: {e}")
+        return 0.0
 
 
-async def process_single_segment(job_id: str, seg: dict, actual_index: int, engine: EdgeTTSEngine, job_dir_path: Path):
-    """Helper to process a single segment with aggressive retry"""
-    max_retries = 10
+async def process_single_segment_with_drift(job_id: str, seg: dict, actual_index: int, engine: EdgeTTSEngine, job_dir_path: Path, drift_compensation: float):
+    """Helper to process a segment with drift compensation"""
+    max_retries = 3
     for retry in range(max_retries):
         try:
-            audio_data = await engine.generate_audio(seg['text'], seg['start'], seg['end'])
+            # Pass drift_compensation to engine
+            audio_data = await engine.generate_audio(seg['text'], seg['start'], seg['end'], drift_compensation=drift_compensation)
+            
             if audio_data and len(audio_data) > 0:
                 seg_file = job_dir_path / f"segment_{actual_index:03d}.mp3"
                 with open(seg_file, 'wb') as f:
                     f.write(audio_data)
                 
-                # Update job status (thread-safe enough for dict updates in asyncio)
+                # Update job status
                 dubbing_jobs[job_id]['completed_segments'] = max(dubbing_jobs[job_id]['completed_segments'], actual_index + 1)
                 if actual_index not in dubbing_jobs[job_id]['ready_segments']:
                     dubbing_jobs[job_id]['ready_segments'].append(actual_index)
                 
-                # Update progress roughly
+                # Update progress
                 total = dubbing_jobs[job_id]['total_segments']
                 completed_count = len(dubbing_jobs[job_id]['ready_segments'])
                 dubbing_jobs[job_id]['progress'] = int((completed_count / total) * 100)
                 
-                logger.info(f"  ✓ Segment {actual_index} ready (Parallel)")
+                logger.debug(f"  ✓ Segment {actual_index} ready (DriftComp={drift_compensation:.3f}s)")
                 return True
             else:
-                logger.warning(f"  ⚠ Segment {actual_index} empty audio (attempt {retry + 1})")
-                if retry < max_retries - 1:
-                    await asyncio.sleep(1.0 * (retry + 1))
+                logger.warning(f"  ⚠ Segment {actual_index} empty (attempt {retry + 1})")
+                await asyncio.sleep(0.5)
         except Exception as ex:
-            logger.error(f"  ✗ Segment {actual_index} failed (attempt {retry + 1}): {ex}")
-            if retry < max_retries - 1:
-                await asyncio.sleep(1.0 * (retry + 1))
+            logger.error(f"  ✗ Segment {actual_index} failed: {ex}")
+            await asyncio.sleep(0.5)
     return False
 
 async def process_remaining_segments(job_id: str, remaining_segments: list, start_index: int, voice: str, job_dir: str):
-    """Background task to generate remaining segments with parallel processing"""
+    """Background task with Drift Compensation"""
     try:
-        logger.info(f"🔄 Processing remaining {len(remaining_segments)} segments for {job_id} (Parallel Mode)...")
+        logger.info(f"🔄 Processing remaining {len(remaining_segments)} segments (Drift Comp Enabled)...")
         engine = EdgeTTSEngine(voice=voice)
         job_dir_path = Path(job_dir)
         
-        BATCH_SIZE = 3  # Process 3 segments at a time for speed
+        BATCH_SIZE = 3
+        # Removed dynamic drift calculation as per user request for fixed speed
         
         for i in range(0, len(remaining_segments), BATCH_SIZE):
             batch = remaining_segments[i : i + BATCH_SIZE]
             tasks = []
             
-            # Create tasks for this batch
+            # Fixed speed means no drift compensation needed
+            drift_per_seg = 0.0
+            
             for j, seg in enumerate(batch):
                 actual_index = start_index + i + j
-                tasks.append(process_single_segment(job_id, seg, actual_index, engine, job_dir_path))
+                tasks.append(process_single_segment_with_drift(job_id, seg, actual_index, engine, job_dir_path, drift_per_seg))
             
-            # Run batch in parallel
             await asyncio.gather(*tasks)
             
-            # Update consolidated audio file after every batch
+            # Just concat to keep file updated, but don't calculate drift
             await concat_available_segments(job_id, job_dir_path)
-
-
-
-
-        
-        # Now concatenate ALL segments into full audio file
-        logger.info(f"🔧 Concatenating all segments into full audio...")
-        all_segments = dubbing_jobs[job_id].get('translated_segments', [])
-        temp_files = []
-        file_list = []
-        current_position = 0.0
-        
-        try:
-            for idx, seg in enumerate(all_segments):
-                seg_file = job_dir_path / f"segment_{idx:03d}.mp3"
-                if not seg_file.exists():
-                    logger.warning(f"  Segment {idx} file not found, skipping")
-                    continue
-                
-                # Add silence before segment if needed
-                silence_duration = seg['start'] - current_position
-                if silence_duration > 0.05:
-                    silence_file = tempfile.NamedTemporaryFile(suffix=f"_sil_{idx}.mp3", delete=False)
-                    silence_file.close()
-                    temp_files.append(silence_file.name)
-                    
-                    silence_cmd = [
-                        "ffmpeg", "-y", "-f", "lavfi", "-i", "anullsrc=r=44100:cl=stereo",
-                        "-t", f"{silence_duration:.6f}",
-                        "-q:a", "9", "-acodec", "libmp3lame",
-                        silence_file.name
-                    ]
-                    subprocess.run(silence_cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, timeout=10)
-                    file_list.append(silence_file.name)
-                    current_position += silence_duration
-                
-                file_list.append(str(seg_file))
-                
-                # Get segment duration
-                probe = subprocess.run(
-                    ["ffprobe", "-v", "quiet", "-show_entries", "format=duration", "-of", "csv=p=0", str(seg_file)],
-                    capture_output=True, text=True, timeout=5
-                )
-                seg_duration = float(probe.stdout.strip()) if probe.stdout.strip() else (seg['end'] - seg['start'])
-                current_position += seg_duration
             
-            # Concatenate all
-            concat_list_file = tempfile.NamedTemporaryFile(mode='w', suffix='.txt', delete=False)
-            for f in file_list:
-                concat_list_file.write(f"file '{f}'\n")
-            concat_list_file.close()
-            temp_files.append(concat_list_file.name)
-            
-            output_file = job_dir_path / "dubbed_full.mp3"
-            
-            # Use consistent audio format for smooth playback
-            output_file = job_dir_path / "dubbed_full.mp3"
-            
-            # Simple concat - aresample filter was causing silent output!
-            concat_cmd = [
-                "ffmpeg", "-y", "-f", "concat", "-safe", "0",
-                "-i", concat_list_file.name,
-                "-acodec", "libmp3lame",
-                "-b:a", "192k",
-                str(output_file)
-            ]
-            result = subprocess.run(concat_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=180)
-
-
-            
-            if result.returncode == 0 and output_file.exists():
-                logger.info(f"✅ Full audio created: {output_file} ({output_file.stat().st_size} bytes)")
-                dubbing_jobs[job_id]['full_audio_url'] = f"/.temp/{job_id}/dubbed_full.mp3"
-                
-                # SAVE TO PERMANENT FILE
-                video_path = dubbing_jobs[job_id].get('video_path', '')
-                if video_path:
-                    video_full_path = COURSES_BASE_DIR / video_path
-                    permanent_audio = video_full_path.with_name(f"{video_full_path.stem}_dubbed.mp3")
-                    try:
-                        import shutil
-                        shutil.copy(output_file, permanent_audio)
-                        logger.info(f"💾 Saved permanent audio: {permanent_audio}")
-                    except Exception as e:
-                        logger.error(f"Failed to save permanent audio: {e}")
-                    
-                    # GENERATE VIETNAMESE SUBTITLES
-                    vi_srt_path = video_full_path.with_name(f"{video_full_path.stem}_vi.srt")
-                    try:
-                        with open(vi_srt_path, 'w', encoding='utf-8') as f:
-                            for i, seg in enumerate(all_segments, 1):
-                                start_time = format_srt_time(seg['start'])
-                                end_time = format_srt_time(seg['end'])
-                                f.write(f"{i}\n")
-                                f.write(f"{start_time} --> {end_time}\n")
-                                f.write(f"{seg['text']}\n\n")
-                        logger.info(f"📝 Created Vietnamese subtitles: {vi_srt_path}")
-                    except Exception as e:
-                        logger.error(f"Failed to create VI subtitles: {e}")
-            else:
-                logger.error(f"FFmpeg concat error: {result.stderr.decode()}")
-            
-        finally:
-            for f in temp_files:
-                try:
-                    os.remove(f)
-                except:
-                    pass
-        
+        # Final cleanup or concat
+        await concat_available_segments(job_id, job_dir_path)
         dubbing_jobs[job_id]['status'] = 'complete'
-        logger.info(f"✅ All segments complete for {job_id}")
+        logger.info(f"✅ Job {job_id} completed!")
         
     except Exception as e:
-        logger.error(f"❌ Background processing error: {e}")
+        logger.error(f"Background task error: {e}")
         dubbing_jobs[job_id]['status'] = 'error'
         dubbing_jobs[job_id]['error'] = str(e)
 
@@ -1753,175 +1348,6 @@ async def dub_instant_progress(job_id: str):
     
     return EventSourceResponse(event_generator())
 
-
-# Serve temp files
-@app.get("/.temp/{job_id}/{filename}")
-async def serve_temp_audio(job_id: str, filename: str):
-    """Serve temporary audio segment files"""
-    file_path = COURSES_BASE_DIR / ".temp" / job_id / filename
-    if not file_path.exists():
-        raise HTTPException(status_code=404, detail="Segment not found")
-    return FileResponse(file_path, media_type="audio/mpeg")
-
-
-async def process_dubbing_background(job_id: str, video_path: str, segments: list, voice: str):
-    """
-    Background worker that processes dubbing in chunks.
-    Updates dubbing_jobs[job_id] as progress is made.
-    """
-    try:
-        logger.info(f"🚀 Processing job {job_id}")
-        dubbing_jobs[job_id]['status'] = 'processing'
-        
-        video_full_path = COURSES_BASE_DIR / video_path
-        CHUNK_SIZE = 10
-        
-        # Translate
-        logger.info(f"📝 Translating {len(segments)} segments...")
-        translated_segments = []
-        
-        if GEMINI_AVAILABLE:
-            merged = smart_merge_subtitles(segments)
-            chunk_size = 20
-            for i in range(0, len(merged), chunk_size):
-                chunk = merged[i:i+chunk_size]
-                prompt = f"Dịch các câu sau sang tiếng Việt tự nhiên cho lồng tiếng. Giữ nguyên định dạng JSON array [{{'start': float, 'end': float, 'text': string}}]. Trả về duy nhất JSON array.\n\nNội dung: {json.dumps(chunk, ensure_ascii=False)}"
-                
-                try:
-                    response = gemini_model.generate_content(prompt)
-                    match = re.search(r'\[.*\]', response.text, re.DOTALL)
-                    if match:
-                        translated_chunk = json.loads(match.group())
-                        translated_segments.extend(translated_chunk)
-                    else:
-                        translated_segments.extend(chunk)
-                except Exception as ex:
-                    logger.error(f"Gemini error: {ex}")
-                    translated_segments.extend(chunk)
-        else:
-            translated_segments = segments
-        
-        # Generate audio in chunks
-        logger.info(f"🎵 Generating audio...")
-        engine = EdgeTTSEngine(voice=voice)
-        all_audio_segments = []
-        
-        for chunk_idx in range(0, len(translated_segments), CHUNK_SIZE):
-            chunk_end = min(chunk_idx + CHUNK_SIZE, len(translated_segments))
-            chunk = translated_segments[chunk_idx:chunk_end]
-            
-            # Generate audio for chunk
-            tasks = [engine.generate_audio(s['text'], s['start'], s['end']) for s in chunk]
-            audio_chunk = await asyncio.gather(*tasks)
-            
-            # Save segments
-            for seg, audio in zip(chunk, audio_chunk):
-                if audio and len(audio) > 0:
-                    all_audio_segments.append((seg, audio))
-            
-            # Update progress
-            dubbing_jobs[job_id]['completed_segments'] = chunk_end
-            dubbing_jobs[job_id]['progress'] = int((chunk_end / len(translated_segments)) * 100)
-            dubbing_jobs[job_id]['current_chunk'] = chunk_idx // CHUNK_SIZE
-        
-        # Concatenate audio (same logic as sync version)
-        logger.info(f"🔧 Concatenating audio...")
-        temp_files = []
-        file_list = []
-        
-        try:
-            current_position = 0.0
-            
-            for idx, (seg, audio_data) in enumerate(all_audio_segments):
-                silence_duration = seg['start'] - current_position
-                
-                if silence_duration > 0.05:
-                    silence_file = tempfile.NamedTemporaryFile(suffix=f"_silence_{idx}.mp3", delete=False)
-                    silence_file.close()
-                    temp_files.append(silence_file.name)
-                    
-                    silence_cmd = [
-                        "ffmpeg", "-y", "-f", "lavfi", "-i", "anullsrc=r=44100:cl=stereo",
-                        "-t", f"{silence_duration:.6f}",
-                        "-q:a", "9", "-acodec", "libmp3lame",
-                        silence_file.name
-                    ]
-                    result = subprocess.run(silence_cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, timeout=10)
-                    if result.returncode == 0:
-                        file_list.append(silence_file.name)
-                        current_position += silence_duration
-                
-                audio_file = tempfile.NamedTemporaryFile(suffix=f"_audio_{idx}.mp3", delete=False)
-                audio_file.write(audio_data)
-                audio_file.close()
-                temp_files.append(audio_file.name)
-                file_list.append(audio_file.name)
-                current_position = seg['end']
-            
-            concat_file = tempfile.NamedTemporaryFile(mode='w', suffix='_concat.txt', delete=False, encoding='utf-8')
-            for f in file_list:
-                escaped_path = f.replace("'", "'\\''")
-                concat_file.write(f"file '{escaped_path}'\n")
-            concat_file.close()
-            temp_files.append(concat_file.name)
-            
-            dubbed_audio_path = video_full_path.with_name(f"{video_full_path.stem}_dubbed.mp3")
-            concat_cmd = [
-                "ffmpeg", "-y", "-f", "concat", "-safe", "0",
-                "-i", concat_file.name,
-                "-acodec", "libmp3lame", "-q:a", "2",
-                str(dubbed_audio_path)
-            ]
-            
-            result = subprocess.run(concat_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=120)
-            if result.returncode != 0:
-                raise Exception(f"FFmpeg failed: {result.stderr.decode()}")
-            
-        finally:
-            for temp_file in temp_files:
-                try:
-                    if os.path.exists(temp_file):
-                        os.unlink(temp_file)
-                except:
-                    pass
-        
-        # Generate SRT
-        vi_srt_path = video_full_path.with_name(f"{video_full_path.stem}_vi.srt")
-        srt_content = ""
-        for idx, seg in enumerate(translated_segments, 1):
-            start_time = format_srt_time(seg['start'])
-            end_time = format_srt_time(seg['end'])
-            srt_content += f"{idx}\n{start_time} --> {end_time}\n{seg['text']}\n\n"
-        
-        with open(vi_srt_path, 'w', encoding='utf-8') as f:
-            f.write(srt_content)
-        
-        # Mark complete
-        rel_audio_path = str(dubbed_audio_path.relative_to(COURSES_BASE_DIR)).replace('\\', '/')
-        rel_srt_path = str(vi_srt_path.relative_to(COURSES_BASE_DIR)).replace('\\', '/')
-        
-        dubbing_jobs[job_id]['status'] = 'complete'
-        dubbing_jobs[job_id]['progress'] = 100
-        dubbing_jobs[job_id]['audio_path'] = rel_audio_path
-        dubbing_jobs[job_id]['srt_path'] = rel_srt_path
-        
-        logger.info(f"✅ Job {job_id} complete!")
-        
-    except Exception as e:
-        logger.error(f"❌ Job {job_id} failed: {e}")
-        dubbing_jobs[job_id]['status'] = 'error'
-        dubbing_jobs[job_id]['error'] = str(e)
-
-def parse_srt_timestamp(timestamp: str) -> float:
-    """Robust SRT timestamp parser (handles , or .)"""
-    timestamp = timestamp.strip().replace(',', '.')
-    parts = timestamp.split(':')
-    if len(parts) == 3:
-        # Expected format HH:MM:SS.mmm
-        h, m, s = parts
-        return int(h)*3600 + int(m)*60 + float(s)
-    return 0.0
-
 def smart_merge_subtitles(subtitles: list) -> list:
     if not subtitles: return []
     result = []
@@ -1942,6 +1368,134 @@ def smart_merge_subtitles(subtitles: list) -> list:
         result.append({'start': start, 'end': end, 'text': text})
         i = j
     return result
+
+def translate_segments_chunk(segments_chunk):
+    """Translate segments using deep-translator with BATCH mode (much faster).
+    Combines all texts with separator, translates in one API call, then splits back.
+    """
+    if not segments_chunk:
+        return segments_chunk
+    
+    # Use a unique separator that won't appear in normal text
+    SEPARATOR = " ||| "
+    
+    try:
+        translator = GoogleTranslator(source='auto', target='vi')
+        
+        # Combine all texts into one string
+        texts = [seg['text'] for seg in segments_chunk]
+        combined_text = SEPARATOR.join(texts)
+        
+        # Single API call for all segments!
+        translated_combined = translator.translate(combined_text)
+        
+        if not translated_combined:
+            logger.warning("Empty translation result, using original")
+            return segments_chunk
+        
+        # Split back into individual translations
+        translated_texts = translated_combined.split(SEPARATOR)
+        
+        # Handle case where separator might have been modified by translation
+        if len(translated_texts) != len(segments_chunk):
+            # Fallback: try with different split patterns
+            for alt_sep in [" ||| ", "|||", " | | | ", "|"]:
+                alt_split = translated_combined.split(alt_sep)
+                if len(alt_split) == len(segments_chunk):
+                    translated_texts = alt_split
+                    break
+        
+        # Build result
+        translated = []
+        for i, seg in enumerate(segments_chunk):
+            if i < len(translated_texts):
+                vi_text = translated_texts[i].strip()
+                translated.append({
+                    'start': seg['start'],
+                    'end': seg['end'],
+                    'text': vi_text or seg['text']
+                })
+            else:
+                translated.append(seg)
+        
+        logger.info(f"✅ Batch translated {len(translated)} segments in 1 API call")
+        return translated
+        
+    except Exception as ex:
+        logger.error(f"Batch translation error: {ex}")
+        # Fallback to Gemini if available (also batch mode)
+        if GEMINI_AVAILABLE:
+            try:
+                prompt = f"Dịch các câu sau sang tiếng Việt tự nhiên cho lồng tiếng. Giữ nguyên định dạng JSON array. Trả về duy nhất JSON array.\n\nNội dung: {json.dumps(segments_chunk, ensure_ascii=False)}"
+                response = gemini_model.generate_content(prompt)
+                match = re.search(r'\[.*\]', response.text, re.DOTALL)
+                if match:
+                    return json.loads(match.group())
+            except Exception as gemini_ex:
+                logger.error(f"Gemini fallback error: {gemini_ex}")
+        return segments_chunk
+
+async def process_dubbing_background(job_id: str, video_path: str, segments: list, voice: str):
+    """
+    Background worker that runs the FULL dubbing pipeline:
+    1. Translate all segments (smart merged)
+    2. Run dubbing (using process_remaining_segments logic which handles drift)
+    """
+    try:
+        logger.info(f"🚀 Processing job {job_id} (Full Background Mode)")
+        dubbing_jobs[job_id]['status'] = 'processing'
+        
+        # 1. Translate
+        translated_segments = []
+        if GEMINI_AVAILABLE:
+            merged = smart_merge_subtitles(segments)
+            BATCH_SIZE = 50
+            for i in range(0, len(merged), BATCH_SIZE):
+                chunk = merged[i : i + BATCH_SIZE]
+                translated_chunk = translate_segments_chunk(chunk)
+                translated_segments.extend(translated_chunk)
+                # Update progress roughly for translation phase
+                translation_progress = int((i / len(merged)) * 10) # First 10% is translation
+                dubbing_jobs[job_id]['progress'] = translation_progress
+        else:
+            translated_segments = segments
+            
+        # Store translated segments in job
+        dubbing_jobs[job_id]['translated_segments'] = translated_segments
+        dubbing_jobs[job_id]['ready_segments'] = []
+        dubbing_jobs[job_id]['total_segments'] = len(translated_segments)
+        
+        # 2. Dubbing (Process ALL segments using the Drift Logic)
+        # We reuse process_remaining_segments but pass ALL segments
+        import tempfile
+        # Create a temp dir for this job if not exists or passed? 
+        # dub_async didn't create a temp dir, so we make one.
+        job_temp_dir = Path(tempfile.mkdtemp(prefix=f"dub_bg_{job_id}_"))
+        logger.info(f"📁 Created temp dir: {job_temp_dir}")
+        dubbing_jobs[job_id]['job_dir'] = str(job_temp_dir)
+        
+        await process_remaining_segments(
+            job_id,
+            translated_segments,
+            start_index=0,
+            voice=voice,
+            job_dir=str(job_temp_dir)
+        )
+        
+    except Exception as e:
+        logger.error(f"❌ Background dubbing failed: {e}")
+        dubbing_jobs[job_id]['status'] = 'error'
+        dubbing_jobs[job_id]['error'] = str(e)
+
+def parse_srt_timestamp(timestamp: str) -> float:
+    """Robust SRT timestamp parser (handles , or .)"""
+    timestamp = timestamp.strip().replace(',', '.')
+    parts = timestamp.split(':')
+    if len(parts) == 3:
+        # Expected format HH:MM:SS.mmm
+        h, m, s = parts
+        return int(h)*3600 + int(m)*60 + float(s)
+    return 0.0
 
 
 # ====== FOLDER MANAGEMENT ENDPOINTS ======
@@ -2187,6 +1741,114 @@ async def get_stats():
 # Serve static files (REMOVED as frontend was deleted)
 # app.mount("/css", StaticFiles(directory=str(PLATFORM_DIR / "css")), name="css")
 # app.mount("/js", StaticFiles(directory=str(PLATFORM_DIR / "js")), name="js")
+
+# ====== YOUTUBE DOWNLOAD ENDPOINTS ======
+
+class YouTubeDownloadRequest(BaseModel):
+    url: str
+
+async def process_download(job_id: str, url: str):
+    """Background task to download video using yt-dlp"""
+    try:
+        download_jobs[job_id]['status'] = 'downloading'
+        
+        # Define hook for progress
+        def progress_hook(d):
+            if d['status'] == 'downloading':
+                try:
+                    p = d.get('_percent_str', '0%').replace('%','')
+                    download_jobs[job_id]['progress'] = float(p)
+                    download_jobs[job_id]['speed'] = d.get('_speed_str', 'N/A')
+                    download_jobs[job_id]['eta'] = d.get('_eta_str', 'N/A')
+                    download_jobs[job_id]['filename'] = d.get('filename', 'Unknown')
+                except:
+                    pass
+            elif d['status'] == 'finished':
+                download_jobs[job_id]['progress'] = 100
+                download_jobs[job_id]['status'] = 'processing' # Processing after download (ffmpeg)
+        
+        # Configure yt-dlp
+        ydl_opts = {
+            'format': 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best',
+            'outtmpl': str(COURSES_BASE_DIR / 'Downloads' / '%(playlist_index)s - %(title)s.%(ext)s'),
+            'progress_hooks': [progress_hook],
+            'quiet': True,
+            'no_warnings': True
+        }
+        
+        # Create Downloads folder if not exists
+        (COURSES_BASE_DIR / 'Downloads').mkdir(exist_ok=True)
+        
+        # Run download in thread to not block event loop
+        loop = asyncio.get_event_loop()
+        await loop.run_in_executor(None, lambda: yt_dlp.YoutubeDL(ydl_opts).download([url]))
+        
+        download_jobs[job_id]['status'] = 'complete'
+        logger.info(f"✅ Download complete for job {job_id}")
+        
+    except Exception as e:
+        logger.error(f"❌ Download failed: {e}")
+        download_jobs[job_id]['status'] = 'error'
+        download_jobs[job_id]['error'] = str(e)
+
+@app.post("/api/download-youtube")
+async def download_youtube(request: YouTubeDownloadRequest, background_tasks: BackgroundTasks):
+    """Start YouTube download in background"""
+    try:
+        job_id = f"dl_{int(time.time() * 1000)}"
+        
+        download_jobs[job_id] = {
+            'status': 'queued',
+            'progress': 0,
+            'url': request.url,
+            'created_at': datetime.now().isoformat(),
+            'speed': '0',
+            'eta': 'measuring...'
+        }
+        
+        background_tasks.add_task(process_download, job_id, request.url)
+        
+        return {
+            "status": "started",
+            "job_id": job_id,
+            "message": "Download started"
+        }
+    except Exception as e:
+        logger.error(f"❌ Failed to start download: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/download-progress/{job_id}")
+async def download_progress(job_id: str):
+    """SSE endpoint for download progress"""
+    if job_id not in download_jobs:
+        raise HTTPException(status_code=404, detail="Job not found")
+        
+    async def event_generator():
+        try:
+            while True:
+                job = download_jobs.get(job_id)
+                if not job:
+                    break
+                    
+                yield {
+                    "event": "progress",
+                    "data": json.dumps({
+                        "job_id": job_id,
+                        "status": job['status'],
+                        "progress": job['progress'],
+                        "speed": job.get('speed', '0'),
+                        "eta": job.get('eta', '0')
+                    })
+                }
+                
+                if job['status'] in ['complete', 'error']:
+                    break
+                    
+                await asyncio.sleep(0.5)
+        except asyncio.CancelledError:
+            pass
+            
+    return EventSourceResponse(event_generator())
 
 @app.get("/", response_class=HTMLResponse)
 async def root():

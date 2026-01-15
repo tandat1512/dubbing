@@ -6,3 +6,6 @@ edge-tts
 google-generativeai
 aiofiles
 requests
+yt-dlp
+deep-translator
+sse-starlette
